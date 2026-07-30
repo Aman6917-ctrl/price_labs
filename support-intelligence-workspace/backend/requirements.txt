@@ -4,7 +4,9 @@ uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 
 # Validation & settings
+# Pin versions that ship manylinux wheels (avoid Rust/source builds on Render)
 pydantic==2.10.4
+pydantic-core==2.27.2
 pydantic-settings==2.7.0
 
 # Database

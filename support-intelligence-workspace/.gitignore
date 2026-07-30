@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+
+# Env & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+
+# Build / cache
+dist/
+build/
+.vite/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+
+# Vector store persistence (regenerate via ingestion)
+vectorstore/*
+!vectorstore/.gitkeep
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Frontend
+frontend/dist/
+frontend/.turbo/
+
+# Coverage
+coverage/
+htmlcov/
+.coverage

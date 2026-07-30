@@ -1,0 +1,27 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# Validation & settings
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# Database
+motor==3.6.0
+pymongo==4.9.2
+
+# AI / RAG
+langchain==0.3.14
+langchain-anthropic==0.3.1
+langchain-community==0.3.14
+langchain-chroma==0.2.0
+langchain-text-splitters==0.3.4
+langchain-core==0.3.29
+chromadb==0.5.23
+anthropic==0.42.0
+sentence-transformers==3.3.1
+
+# Utilities
+python-dotenv==1.0.1
+httpx==0.28.1

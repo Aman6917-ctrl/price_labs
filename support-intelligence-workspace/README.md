@@ -159,7 +159,7 @@ support-intelligence-workspace/
 
 ```bash
 git clone https://github.com/Aman6917-ctrl/price_labs.git
-cd price_labs
+cd price_labs/support-intelligence-workspace
 ```
 
 ### 2. Install backend

@@ -58,7 +58,8 @@ class Settings(BaseSettings):
     chroma_persist_dir: str = "../vectorstore"
     chroma_collection: str = "pricelabs_docs_minilm"
     rag_top_k: int = 5
-    docs_path: str = "../docs"
+    # Prefer backend/docs (Railway root = backend/). Local monorepo also has ../docs.
+    docs_path: str = "docs"
     chunk_size: int = 900
     chunk_overlap: int = 150
 

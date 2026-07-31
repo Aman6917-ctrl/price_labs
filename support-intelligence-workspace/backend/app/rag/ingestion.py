@@ -40,7 +40,7 @@ class IngestionService:
 
     @property
     def docs_path(self) -> Path:
-        return _resolve_from_backend(self.settings.docs_path)
+        return _resolve_docs_path(self.settings.docs_path)
 
     @property
     def chroma_path(self) -> Path:
@@ -125,3 +125,29 @@ def _resolve_from_backend(relative_or_absolute: str) -> Path:
         return path
     backend_root = Path(__file__).resolve().parents[2]  # .../backend
     return (backend_root / path).resolve()
+
+
+def _resolve_docs_path(configured: str) -> Path:
+    """
+    Resolve knowledge-base docs for local + Railway layouts.
+
+    Tries configured path first, then backend/docs and ../docs.
+    Absolute bad env values (e.g. DOCS_PATH=/docs) fall through to bundled docs.
+    """
+    candidates = [configured, "docs", "../docs"]
+    seen: set[Path] = set()
+    for raw in candidates:
+        if not raw:
+            continue
+        path = _resolve_from_backend(raw) if not Path(raw).is_absolute() else Path(raw)
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.is_dir():
+            return path
+    # Last resort relative defaults even if configured was a missing absolute path
+    for raw in ("docs", "../docs"):
+        path = _resolve_from_backend(raw)
+        if path.is_dir():
+            return path
+    return _resolve_from_backend(configured if not Path(configured).is_absolute() else "docs")

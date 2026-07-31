@@ -86,11 +86,24 @@ app.add_middleware(
 @app.get("/health")
 async def health() -> dict[str, str | bool | int]:
     bus: EventBus | None = getattr(app.state, "event_bus", None)
+    from app.rag.ingestion import IngestionService
+
+    try:
+        docs = IngestionService(settings=settings).docs_path
+        docs_path = str(docs)
+        docs_ready = docs.is_dir()
+    except Exception:
+        docs_path = ""
+        docs_ready = False
+
     return {
         "status": "ok",
         "service": settings.app_name,
         "mongodb": bool(getattr(app.state, "db_available", False)),
         "event_handlers": bus.handler_count() if bus else 0,
+        "docs_path": docs_path,
+        "docs_ready": docs_ready,
+        "build": "docs-bundle-v1",
     }
 
 

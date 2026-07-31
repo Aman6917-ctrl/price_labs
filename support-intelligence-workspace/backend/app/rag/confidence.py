@@ -88,10 +88,9 @@ class ConfidenceCalculator:
         )
         score = round(max(0.0, min(100.0, score_0_1 * 100)), 1)
 
-        # Hard guards — similarity alone must never yield High
-        if evidence and evidence.unsupported_topic:
-            score = min(score, UNSUPPORTED_SCORE_CAP)
-        elif direct < 0.5:
+        # Soft guards only — unsupported clamp is applied later by AskService
+        # AFTER doc-support verification (never clamp on a false-positive gap).
+        if direct < 0.5:
             # No clear feature mention → at most medium band, usually lower
             score = min(score, self._medium - 0.1)
         elif ev_quality < 0.45:
@@ -99,10 +98,7 @@ class ConfidenceCalculator:
 
         # High requires real evidence + decent similarity
         if score >= self._high and (
-            direct < 0.99
-            or ev_quality < 0.55
-            or top_sim < 0.35
-            or (evidence is not None and evidence.unsupported_topic)
+            direct < 0.99 or ev_quality < 0.55 or top_sim < 0.35
         ):
             score = min(score, self._high - 0.1)
 

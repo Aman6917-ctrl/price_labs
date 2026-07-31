@@ -3,12 +3,15 @@ Evidence / relevance assessment for Ask scoring.
 
 Vector similarity alone must never produce High confidence. We check whether
 retrieved chunks actually mention the requested feature / entities.
+
+Unsupported-topic detection must NOT reject supported products (e.g. Airbnb)
+when the matching document is present — only truly missing topics become gaps.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from app.rag.retrieval.types import RetrievedChunk
 
@@ -242,6 +245,7 @@ class EvidenceResult:
     focus_terms: tuple[str, ...] = field(default_factory=tuple)
     missing_terms: tuple[str, ...] = field(default_factory=tuple)
     reasons: tuple[str, ...] = field(default_factory=tuple)
+    supporting_document_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
 class EvidenceAssessor:
@@ -249,8 +253,8 @@ class EvidenceAssessor:
         question = sanitize_question(question)
         focus = extract_focus_terms(question)
         features = extract_feature_phrases(question)
-        # Critical terms must appear for the topic to be considered supported
         critical = _critical_terms(features, focus)
+        primary = _primary_entities(features, critical, focus)
 
         if not chunks:
             return EvidenceResult(
@@ -261,40 +265,63 @@ class EvidenceAssessor:
                 semantic_relevance=0.0,
                 unsupported_topic=True,
                 focus_terms=tuple(focus),
-                missing_terms=tuple(critical or focus),
+                missing_terms=tuple(primary or critical or focus),
                 reasons=("No chunks retrieved",),
             )
 
         corpus = "\n".join(_chunk_text(c) for c in chunks).lower()
-        present = [t for t in focus if _term_in_corpus(t, corpus)]
-        missing = [t for t in focus if not _term_in_corpus(t, corpus)]
+        present = [t for t in focus if _term_in_evidence(t, chunks, corpus)]
+        missing = [t for t in focus if not _term_in_evidence(t, chunks, corpus)]
 
         keyword_overlap = len(present) / max(len(focus), 1) if focus else 0.0
 
         entities = [t for t in focus if len(t) >= 4 and t not in _WEAK_ALONE]
         if not entities:
             entities = [t for t in focus if t not in _WEAK_ALONE] or list(focus)
-        ent_present = [t for t in entities if _term_in_corpus(t, corpus)]
+        ent_present = [t for t in entities if _term_in_evidence(t, chunks, corpus)]
         entity_overlap = (
             len(ent_present) / max(len(entities), 1) if entities else 0.0
         )
 
-        if critical:
-            mentioned = sum(1 for f in critical if _term_in_corpus(f, corpus))
-            direct_mention = mentioned / len(critical)
-            feature_missing = [f for f in critical if not _term_in_corpus(f, corpus)]
-        elif features:
-            mentioned = sum(1 for f in features if _term_in_corpus(f, corpus))
-            direct_mention = mentioned / len(features)
-            feature_missing = [f for f in features if not _term_in_corpus(f, corpus)]
+        # Primary product/feature entities decide support (Airbnb, Booking.com, …)
+        check_terms = primary or critical or [
+            t for t in focus if t not in _WEAK_ALONE
+        ]
+        if check_terms:
+            mentioned = sum(
+                1 for f in check_terms if _term_in_evidence(f, chunks, corpus)
+            )
+            direct_mention = mentioned / len(check_terms)
+            feature_missing = [
+                f for f in check_terms if not _term_in_evidence(f, chunks, corpus)
+            ]
         else:
-            # Require majority of non-weak focus terms — never "any present" = 1.0
-            strong = [t for t in focus if t not in _WEAK_ALONE]
-            if not strong:
-                strong = list(focus)
-            hit = sum(1 for t in strong if _term_in_corpus(t, corpus))
+            strong = [t for t in focus if t not in _WEAK_ALONE] or list(focus)
+            hit = sum(1 for t in strong if _term_in_evidence(t, chunks, corpus))
             direct_mention = hit / max(len(strong), 1)
-            feature_missing = [t for t in strong if not _term_in_corpus(t, corpus)]
+            feature_missing = [
+                t for t in strong if not _term_in_evidence(t, chunks, corpus)
+            ]
+
+        supporting_ids = tuple(
+            dict.fromkeys(
+                c.document_id
+                for c in chunks
+                if any(
+                    _chunk_mentions_term(c, t)
+                    for t in (primary or critical or present or [])
+                )
+            )
+        )
+
+        # Hard guarantee: if a matching product doc is present, never unsupported
+        doc_supports = bool(supporting_ids) and (
+            not primary
+            or all(_term_in_evidence(p, chunks, corpus) for p in primary)
+        )
+        if doc_supports and primary:
+            direct_mention = 1.0
+            feature_missing = []
 
         sims = [c.similarity for c in chunks]
         top_sim = max(sims) if sims else 0.0
@@ -310,18 +337,21 @@ class EvidenceAssessor:
         )
 
         unsupported = _is_unsupported(
-            focus=focus,
-            critical=critical,
             features=features,
+            primary=primary,
+            critical=critical,
+            focus=focus,
             direct_mention=direct_mention,
             entity_overlap=entity_overlap,
             keyword_overlap=keyword_overlap,
             feature_missing=feature_missing,
+            doc_supports=doc_supports,
+            top_sim=top_sim,
         )
 
         reasons: list[str] = []
         if unsupported:
-            miss = feature_missing or missing
+            miss = feature_missing or missing or list(primary)
             if miss:
                 reasons.append(
                     "Requested topic not mentioned in retrieved docs: "
@@ -342,6 +372,34 @@ class EvidenceAssessor:
             focus_terms=tuple(focus),
             missing_terms=tuple(feature_missing or missing),
             reasons=tuple(reasons),
+            supporting_document_ids=supporting_ids,
+        )
+
+    def has_direct_doc_support(
+        self, question: str, chunks: list[RetrievedChunk]
+    ) -> bool:
+        """True when a retrieved doc clearly matches the asked product/feature."""
+        if not chunks:
+            return False
+        question = sanitize_question(question)
+        features = extract_feature_phrases(question)
+        focus = extract_focus_terms(question)
+        critical = _critical_terms(features, focus)
+        primary = _primary_entities(features, critical, focus)
+        if not primary:
+            return False
+        corpus = "\n".join(_chunk_text(c) for c in chunks).lower()
+        return all(_term_in_evidence(p, chunks, corpus) for p in primary)
+
+    def mark_supported(self, evidence: EvidenceResult) -> EvidenceResult:
+        """Override a false-unsupported result after doc-support verification."""
+        return replace(
+            evidence,
+            unsupported_topic=False,
+            direct_mention=1.0,
+            missing_terms=(),
+            reasons=(),
+            evidence_quality=max(evidence.evidence_quality, 0.85),
         )
 
 
@@ -394,7 +452,6 @@ def extract_feature_phrases(question: str) -> list[str]:
                 and p not in {"integration", "integrations", "feature"}
             ]
             if not parts:
-                # Keep bare role words like ceo
                 raw = phrase.strip()
                 if raw and raw not in found:
                     found.append(raw)
@@ -435,13 +492,37 @@ def _critical_terms(features: list[str], focus: list[str]) -> list[str]:
             and (" " in f or f not in _WEAK_ALONE)
         ]
         return critical or [f.strip(".,!?;:") for f in features if f.strip(".,!?;:")]
-    # Non-feature questions: product/topic nouns only (not weak generics)
     strong = [
-        t
-        for t in focus
-        if t not in _WEAK_ALONE and t not in _SYMPTOM_TERMS
+        t for t in focus if t not in _WEAK_ALONE and t not in _SYMPTOM_TERMS
     ]
     return strong
+
+
+def _primary_entities(
+    features: list[str],
+    critical: list[str],
+    focus: list[str],
+) -> list[str]:
+    """
+    Brand / product entities that decide supported vs gap.
+
+    Prefer feature phrases (Airbnb, WhatsApp, Booking.com). Fall back to
+    strong critical nouns — never symptom/weak generics alone.
+    """
+    if features:
+        # Prefer single-token product names; keep multi-word if that's all we have
+        singles = [
+            f
+            for f in features
+            if " " not in f and f not in _WEAK_ALONE and f not in _SYMPTOM_TERMS
+        ]
+        if singles:
+            return list(dict.fromkeys(singles))
+        return list(dict.fromkeys(features))[:3]
+    if critical:
+        return list(dict.fromkeys(critical))[:3]
+    strong = [t for t in focus if t not in _WEAK_ALONE and t not in _SYMPTOM_TERMS]
+    return strong[:3]
 
 
 def _term_in_corpus(term: str, corpus: str) -> bool:
@@ -450,31 +531,80 @@ def _term_in_corpus(term: str, corpus: str) -> bool:
         return False
     if " " in term:
         return term in corpus
-    # Word-boundary-ish match; allow booking.com style tokens
     return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", corpus) is not None
+
+
+def _chunk_mentions_term(chunk: RetrievedChunk, term: str) -> bool:
+    """Match against title/category/tags/document_id/content — not body alone."""
+    term = term.lower().strip().strip(".,!?;:")
+    if not term:
+        return False
+    doc_id = (chunk.document_id or "").lower().replace("_", "-")
+    slug = term.replace(" ", "-").replace(".", "-")
+    if slug and slug in doc_id:
+        return True
+    if term.replace(".", "") and term.replace(".", "") in doc_id.replace("-", "").replace(
+        ".", ""
+    ):
+        # booking.com ↔ booking-com-integration
+        compact_term = re.sub(r"[^a-z0-9]", "", term)
+        compact_id = re.sub(r"[^a-z0-9]", "", doc_id)
+        if compact_term and compact_term in compact_id:
+            return True
+    blob = _chunk_text(chunk).lower()
+    return _term_in_corpus(term, blob)
+
+
+def _term_in_evidence(
+    term: str,
+    chunks: list[RetrievedChunk],
+    corpus: str,
+) -> bool:
+    if _term_in_corpus(term, corpus):
+        return True
+    return any(_chunk_mentions_term(c, term) for c in chunks)
 
 
 def _is_unsupported(
     *,
-    focus: list[str],
-    critical: list[str],
     features: list[str],
+    primary: list[str],
+    critical: list[str],
+    focus: list[str],
     direct_mention: float,
     entity_overlap: float,
     keyword_overlap: float,
     feature_missing: list[str],
+    doc_supports: bool,
+    top_sim: float,
 ) -> bool:
-    # Explicit feature asks (WhatsApp, Expedia, CEO, refund policy): all critical must hit
-    if features and critical and direct_mention < 1.0:
-        return True
-    if features and feature_missing:
-        return True
-    # Symptom / troubleshooting asks: require core topic terms, not every word
-    if critical and direct_mention < 1.0:
-        return True
+    """
+    Knowledge-gap only when:
+    - no relevant documents match the asked product/feature, OR
+    - retrieved evidence clearly does not answer the question.
+
+    If a matching product document is present (doc_supports), never unsupported.
+    """
+    if doc_supports and direct_mention >= 1.0:
+        return False
+
+    # Named feature / integration asks (WhatsApp, Netflix, CEO, refund policy)
+    if features and primary:
+        return direct_mention < 1.0 or bool(feature_missing)
+
+    # Non-feature troubleshooting / how-to: need topic overlap, not perfect match
+    if critical:
+        if direct_mention >= 0.99:
+            return False
+        if entity_overlap == 0.0 and direct_mention == 0.0:
+            return True
+        # Weak lexical overlap + low similarity → gap
+        if direct_mention < 0.5 and top_sim < 0.35:
+            return True
+        return False
+
     if focus and entity_overlap == 0.0 and keyword_overlap == 0.0:
         return True
-    # Ambiguous with no critical topic nouns: only unsupported if evidence is empty
     if not critical and not features and keyword_overlap < 0.34:
         return True
     return False

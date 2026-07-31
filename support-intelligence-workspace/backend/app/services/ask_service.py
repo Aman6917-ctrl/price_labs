@@ -143,11 +143,21 @@ class AskService:
             trace.unique_documents = len({c.document_id for c in chunks})
 
             evidence = self._evidence.assess(request.question, chunks)
+
+            # Safety net: if a matching product doc was retrieved, never treat
+            # the question as an unsupported knowledge gap (false-negative guard).
+            if (
+                evidence.unsupported_topic
+                and chunks
+                and self._evidence.has_direct_doc_support(request.question, chunks)
+            ):
+                evidence = self._evidence.mark_supported(evidence)
+
             confidence = self._confidence.calculate(chunks, evidence=evidence)
             coverage = self._coverage.calculate(chunks, evidence=evidence)
 
-            # Unsupported topics: never call the LLM (prevents hallucinations)
-            # and never surface unrelated docs/citations as if they support the answer.
+            # Unsupported topics: clamp scores only AFTER verification above,
+            # skip LLM, and do not cite loosely related docs as evidence.
             loosely_related: list[RetrievedChunk] = []
             if evidence.unsupported_topic:
                 loosely_related = list(chunks)

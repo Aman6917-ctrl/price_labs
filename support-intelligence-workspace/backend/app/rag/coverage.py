@@ -88,9 +88,8 @@ class CoverageCalculator:
             1,
         )
 
-        if evidence and evidence.unsupported_topic:
-            score = min(score, UNSUPPORTED_SCORE_CAP)
-        elif direct < 0.5:
+        # Unsupported clamp is applied by AskService after doc-support verification.
+        if direct < 0.5:
             score = min(score, 45.0)
 
         return CoverageResult(

@@ -23,17 +23,19 @@ def _chunk(
     title: str = "Airbnb Integration",
     similarity: float = 0.88,
     document_id: str = "airbnb-integration",
+    category: str | None = None,
+    tags: tuple[str, ...] = ("airbnb", "pms"),
 ) -> RetrievedChunk:
     return RetrievedChunk(
         content=content,
         document_id=document_id,
         title=title,
-        category="Airbnb Integration",
-        source="docs/airbnb-integration.md",
+        category=category or title,
+        source=f"docs/{document_id}.md",
         version="1.0.0",
         last_updated="2026-01-01",
         similarity=similarity,
-        tags=("airbnb", "pms"),
+        tags=tags,
         chunk_index=0,
     )
 
@@ -52,7 +54,16 @@ BOOKING_CHUNK = _chunk(
     ),
     title="Booking.com Integration",
     document_id="booking-com-integration",
-    similarity=0.82,
+    similarity=0.86,
+    tags=("booking.com", "pms"),
+)
+
+DYNAMIC_CHUNK = _chunk(
+    content="Dynamic pricing adjusts nightly rates based on occupancy and demand.",
+    title="Dynamic Pricing Overview",
+    document_id="dynamic-pricing",
+    similarity=0.9,
+    tags=("pricing", "dynamic"),
 )
 
 UNSUPPORTED_QUESTIONS = [
@@ -77,6 +88,25 @@ SUPPORTED_QUESTIONS = [
 ]
 
 
+def _supported_corpus() -> list[RetrievedChunk]:
+    return [
+        AIRBNB_CHUNK,
+        BOOKING_CHUNK,
+        DYNAMIC_CHUNK,
+        _chunk(
+            content=(
+                "Why prices are not updating: verify sync and push. "
+                "Dynamic pricing overview covers demand signals. "
+                "Booking.com connectivity suspended when credentials fail."
+            ),
+            title="Troubleshooting Guide",
+            document_id="troubleshooting",
+            similarity=0.8,
+            tags=("sync", "prices"),
+        ),
+    ]
+
+
 @pytest.mark.parametrize("question", UNSUPPORTED_QUESTIONS)
 def test_unsupported_questions_are_detected(question: str):
     assessor = EvidenceAssessor()
@@ -87,30 +117,87 @@ def test_unsupported_questions_are_detected(question: str):
 
 @pytest.mark.parametrize("question", SUPPORTED_QUESTIONS)
 def test_supported_questions_not_falsely_unsupported(question: str):
-    # Richer fixtures so symptom-style asks still find topic nouns in evidence
-    chunks = [
-        AIRBNB_CHUNK,
-        BOOKING_CHUNK,
-        _chunk(
-            content=(
-                "Why prices are not updating: verify sync and push. "
-                "Dynamic pricing overview covers demand signals. "
-                "Booking.com connectivity suspended when credentials fail."
-            ),
-            title="Troubleshooting Guide",
-            document_id="troubleshooting",
-            similarity=0.8,
-        ),
-        _chunk(
-            content="Dynamic pricing adjusts nightly rates based on occupancy.",
-            title="Dynamic Pricing Overview",
-            document_id="dynamic-pricing",
-            similarity=0.86,
-        ),
-    ]
-    evidence = EvidenceAssessor().assess(question, chunks)
+    evidence = EvidenceAssessor().assess(question, _supported_corpus())
     assert evidence.unsupported_topic is False, evidence
     assert evidence.direct_mention == 1.0
+
+
+@pytest.mark.parametrize(
+    "question,chunks",
+    [
+        ("Does PriceLabs support Airbnb integration?", [AIRBNB_CHUNK]),
+        ("Booking.com integration", [BOOKING_CHUNK]),
+        ("Dynamic pricing", [DYNAMIC_CHUNK]),
+    ],
+)
+def test_supported_topics_high_confidence(question: str, chunks: list[RetrievedChunk]):
+    """Regression: supported product docs → High confidence (not knowledge gap)."""
+    settings = Settings()
+    evidence = EvidenceAssessor().assess(question, chunks)
+    assert evidence.unsupported_topic is False, evidence
+    assert evidence.supporting_document_ids, evidence
+
+    confidence = ConfidenceCalculator(settings).calculate(chunks, evidence=evidence)
+    coverage = CoverageCalculator().calculate(chunks, evidence=evidence)
+
+    assert confidence.level == ConfidenceLevel.HIGH, confidence
+    assert confidence.score >= 75
+    assert coverage.score >= 70
+
+    action = RecommendedActionResolver().resolve(
+        coverage_score=coverage.score,
+        confidence_level=confidence.level,
+        quality=AnswerQuality.GOOD,
+        unsupported_topic=False,
+        insufficient_answer=False,
+    )
+    assert action.action == RecommendedAction.SEND_RESPONSE
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Does PriceLabs support WhatsApp integration?",
+        "Does PriceLabs integrate with Telegram?",
+        "How do I reset my Netflix password?",
+    ],
+)
+def test_truly_unsupported_stay_low_confidence(question: str):
+    settings = Settings()
+    chunks = [AIRBNB_CHUNK, BOOKING_CHUNK, DYNAMIC_CHUNK]
+    evidence = EvidenceAssessor().assess(question, chunks)
+    assert evidence.unsupported_topic is True
+
+    confidence = ConfidenceCalculator(settings).calculate(chunks, evidence=evidence)
+    coverage = CoverageCalculator().calculate(chunks, evidence=evidence)
+    confidence = ConfidenceCalculator(settings).clamp_unsupported(confidence)
+    coverage = CoverageCalculator().clamp_unsupported(coverage)
+
+    assert confidence.level == ConfidenceLevel.LOW
+    assert confidence.score <= 30
+    assert coverage.score <= 30
+
+
+def test_airbnb_doc_present_never_unsupported():
+    """If an Airbnb Integration document is retrieved, never classify as gap."""
+    chunks = [
+        _chunk(
+            content="Authorize the PriceLabs Airbnb app with the host account.",
+            title="Airbnb Integration",
+            document_id="airbnb-integration",
+            similarity=0.72,
+        )
+    ]
+    evidence = EvidenceAssessor().assess(
+        "Does PriceLabs support Airbnb integration?",
+        chunks,
+    )
+    assert evidence.unsupported_topic is False
+    assert "airbnb-integration" in evidence.supporting_document_ids
+    assert EvidenceAssessor().has_direct_doc_support(
+        "Does PriceLabs support Airbnb integration?",
+        chunks,
+    )
 
 
 def test_punctuation_does_not_break_topic_match():
@@ -137,6 +224,8 @@ def test_unsupported_confidence_and_coverage_capped(question: str):
 
     confidence = ConfidenceCalculator(settings).calculate(chunks, evidence=evidence)
     coverage = CoverageCalculator().calculate(chunks, evidence=evidence)
+    confidence = ConfidenceCalculator(settings).clamp_unsupported(confidence)
+    coverage = CoverageCalculator().clamp_unsupported(coverage)
 
     assert evidence.unsupported_topic
     assert confidence.score <= 30
@@ -194,6 +283,7 @@ def test_similarity_alone_cannot_be_high():
         chunks,
     )
     confidence = ConfidenceCalculator(settings).calculate(chunks, evidence=evidence)
+    confidence = ConfidenceCalculator(settings).clamp_unsupported(confidence)
     assert confidence.level != ConfidenceLevel.HIGH
     assert confidence.score <= 30
 
@@ -222,6 +312,9 @@ def test_feature_phrase_extraction():
         "What is the PriceLabs refund policy?"
     )
     assert "ceo" in extract_feature_phrases("Who is the CEO of PriceLabs?")
+    assert "airbnb" in extract_feature_phrases(
+        "Does PriceLabs support Airbnb integration?"
+    )
 
 
 def test_insufficient_answer_detection():
@@ -263,3 +356,14 @@ def test_giant_token_ignored_for_critical_match():
     ]
     evidence = EvidenceAssessor().assess("Airbnb " + ("x" * 200), chunks)
     assert evidence.unsupported_topic is False
+
+
+def test_mark_supported_override():
+    evidence = EvidenceAssessor().assess(
+        "Does PriceLabs support WhatsApp?",
+        [AIRBNB_CHUNK],
+    )
+    assert evidence.unsupported_topic is True
+    fixed = EvidenceAssessor().mark_supported(evidence)
+    assert fixed.unsupported_topic is False
+    assert fixed.direct_mention == 1.0
